@@ -1,0 +1,274 @@
+openapi: 3.1.0
+info:
+  title: Keystone Secrets Protocol
+  version: "1.0"
+  description: >-
+    HTTP API for shared secret storage. Until 1.0.0, protocol v1 changes only by adding fields.
+servers:
+  - url: https://secrets.example
+    description: Placeholder (server implementation is SEC-3)
+security:
+  - bearer: []
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: Service token `sst_…` (issued by SEC-3)
+  parameters:
+    PathNs:
+      name: ns
+      in: path
+      required: true
+      description: >-
+        Secret namespace path segment, percent-encoded the same way as in `SecretRef.key()`.
+      schema:
+        type: string
+    PathScopeId:
+      name: scope_id
+      in: path
+      required: true
+      description: >-
+        Scope identifier, percent-encoded like `SecretRef.key()`. Use the literal `-` when the
+        scope id is empty (`platform` and `default`).
+      schema:
+        type: string
+    KeystoneIdentity:
+      name: X-Keystone-Identity
+      in: header
+      required: false
+      description: Optional signed gateway attestation about the acting person.
+      schema:
+        type: string
+  schemas:
+    SecretRef:
+      type: object
+      required: [namespace, scope, scope_id, name]
+      properties:
+        namespace: { type: string }
+        scope:
+          type: string
+          enum: [platform, client, project, person, role, default]
+        scope_id: { type: string }
+        name: { type: string }
+    SecretMeta:
+      type: object
+      required: [ref, version, state, public, created_at, updated_at, updated_by]
+      properties:
+        ref: { $ref: "#/components/schemas/SecretRef" }
+        version: { type: integer }
+        state: { type: string, enum: [ready, needs_reentry] }
+        public: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        updated_by: { type: string }
+    Binding:
+      type: object
+      required: [namespace, subject, ref, position, created_at, created_by]
+      properties:
+        namespace: { type: string }
+        subject: { type: string }
+        ref: { $ref: "#/components/schemas/SecretRef" }
+        position: { type: ["integer", "null"] }
+        created_at: { type: string, format: date-time }
+        created_by: { type: string }
+    AuditEvent:
+      type: object
+      required:
+        - id
+        - at
+        - event
+        - service
+        - person_verified
+        - outcome
+        - count
+      properties:
+        id: { type: integer }
+        at: { type: string, format: date-time }
+        event:
+          type: string
+          enum: [put, use, delete, bind, unbind, denied, rekey]
+        namespace: { type: ["string", "null"] }
+        ref: { type: ["string", "null"] }
+        service: { type: string }
+        person_hash: { type: ["string", "null"] }
+        person_verified: { type: boolean }
+        purpose: { type: ["string", "null"] }
+        outcome: { type: string, enum: [ok, denied, error] }
+        code: { type: ["string", "null"] }
+        count: { type: integer }
+        detail: { type: ["object", "null"], additionalProperties: true }
+    Health:
+      type: object
+      required: [status, key, backend, schema_version]
+      properties:
+        status: { type: string, enum: [ok, degraded, unavailable] }
+        key: { type: string, enum: [ok, key_mismatch] }
+        backend: { type: string }
+        schema_version: { type: integer }
+    PutRequest:
+      type: object
+      required: [fields]
+      properties:
+        fields:
+          type: object
+          additionalProperties: { type: string }
+        public:
+          type: object
+          additionalProperties: true
+    UseByRef:
+      type: object
+      required: [ref, purpose]
+      properties:
+        ref: { $ref: "#/components/schemas/SecretRef" }
+        purpose: { type: string }
+        on_behalf_of: { type: ["string", "null"] }
+    UseBySubject:
+      type: object
+      required: [sub, roles, purpose]
+      properties:
+        sub: { type: string }
+        roles:
+          type: array
+          items: { type: string }
+        purpose: { type: string }
+        on_behalf_of: { type: ["string", "null"] }
+    UseRequest:
+      oneOf:
+        - { $ref: "#/components/schemas/UseByRef" }
+        - { $ref: "#/components/schemas/UseBySubject" }
+    UseResponse:
+      type: object
+      required: [ref, version, fields]
+      properties:
+        ref: { $ref: "#/components/schemas/SecretRef" }
+        version: { type: integer }
+        fields:
+          type: object
+          additionalProperties: { type: string }
+    Error:
+      type: object
+      required: [code]
+      properties:
+        code: { type: string }
+        detail: { type: string }
+paths:
+  /v1/secrets/{ns}/{scope}/{scope_id}/{name}:
+    put:
+      summary: Write secret fields
+      x-permission: write
+      parameters:
+        - { $ref: "#/components/parameters/PathNs" }
+        - { name: scope, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/PathScopeId" }
+        - { name: name, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/KeystoneIdentity" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PutRequest" }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/SecretMeta" } } } }
+        "400": { description: invalid }
+        "401": { description: no_token }
+        "403": { description: permission }
+    get:
+      summary: Read secret metadata
+      x-permission: read-meta
+      parameters:
+        - { $ref: "#/components/parameters/PathNs" }
+        - { name: scope, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/PathScopeId" }
+        - { name: name, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: OK }
+        "404": { description: not_found }
+    delete:
+      summary: Delete a secret
+      x-permission: write
+      parameters:
+        - { $ref: "#/components/parameters/PathNs" }
+        - { name: scope, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/PathScopeId" }
+        - { name: name, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/KeystoneIdentity" }
+      responses:
+        "204": { description: deleted }
+        "409": { description: in_use }
+  /v1/secrets/{ns}:
+    get:
+      summary: List secrets in a namespace
+      x-permission: read-meta
+      parameters:
+        - { $ref: "#/components/parameters/PathNs" }
+        - { name: scope, in: query, schema: { type: string } }
+        - { name: scope_id, in: query, schema: { type: string } }
+      responses:
+        "200": { description: OK }
+  /v1/bindings/{ns}:
+    put:
+      summary: Create or replace a binding
+      x-permission: bind
+      parameters:
+        - { $ref: "#/components/parameters/PathNs" }
+        - { $ref: "#/components/parameters/KeystoneIdentity" }
+      responses:
+        "200": { description: OK }
+    delete:
+      summary: Remove a binding
+      x-permission: bind
+      parameters:
+        - { $ref: "#/components/parameters/PathNs" }
+        - { $ref: "#/components/parameters/KeystoneIdentity" }
+      responses:
+        "204": { description: deleted }
+    get:
+      summary: List bindings
+      x-permission: bind
+      parameters:
+        - { $ref: "#/components/parameters/PathNs" }
+      responses:
+        "200": { description: OK }
+  /v1/resolve/{ns}:
+    post:
+      summary: Resolve a binding to a secret ref
+      x-permission: read-meta
+      parameters:
+        - { $ref: "#/components/parameters/PathNs" }
+      responses:
+        "200": { description: OK }
+        "404": { description: not_found }
+  /v1/use/{ns}:
+    post:
+      summary: Decrypt and return secret field values
+      x-permission: use
+      parameters:
+        - { $ref: "#/components/parameters/PathNs" }
+        - { $ref: "#/components/parameters/KeystoneIdentity" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UseRequest" }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/UseResponse" } } } }
+        "403": { description: permission }
+        "404": { description: not_found }
+        "422": { description: unreadable }
+  /v1/audit:
+    get:
+      summary: Query audit log
+      x-permission: audit
+      parameters:
+        - { name: ns, in: query, schema: { type: string } }
+        - { name: since, in: query, schema: { type: string, format: date-time } }
+      responses:
+        "200": { description: OK }
+  /v1/health:
+    get:
+      summary: Health check
+      x-permission: read-meta
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Health" } } } }
+        "503": { description: unavailable }
