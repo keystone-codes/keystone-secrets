@@ -5,7 +5,7 @@ info:
   description: >-
     HTTP API for shared secret storage. Until 1.0.0, protocol v1 changes only by adding fields.
 servers:
-  - url: https://secrets.example/v1
+  - url: https://secrets.example
     description: Placeholder (server implementation is SEC-3)
 security:
   - bearer: []
@@ -15,6 +15,31 @@ components:
       type: http
       scheme: bearer
       description: Service token `sst_…` (issued by SEC-3)
+  parameters:
+    PathNs:
+      name: ns
+      in: path
+      required: true
+      description: >-
+        Secret namespace path segment, percent-encoded the same way as in `SecretRef.key()`.
+      schema:
+        type: string
+    PathScopeId:
+      name: scope_id
+      in: path
+      required: true
+      description: >-
+        Scope identifier, percent-encoded like `SecretRef.key()`. Use the literal `-` when the
+        scope id is empty (`platform` and `default`).
+      schema:
+        type: string
+    KeystoneIdentity:
+      name: X-Keystone-Identity
+      in: header
+      required: false
+      description: Optional signed gateway attestation about the acting person.
+      schema:
+        type: string
   schemas:
     SecretRef:
       type: object
@@ -44,7 +69,7 @@ components:
         namespace: { type: string }
         subject: { type: string }
         ref: { $ref: "#/components/schemas/SecretRef" }
-        position: { type: integer, nullable: true }
+        position: { type: ["integer", "null"] }
         created_at: { type: string, format: date-time }
         created_by: { type: string }
     AuditEvent:
@@ -63,16 +88,16 @@ components:
         event:
           type: string
           enum: [put, use, delete, bind, unbind, denied, rekey]
-        namespace: { type: string, nullable: true }
-        ref: { type: string, nullable: true }
+        namespace: { type: ["string", "null"] }
+        ref: { type: ["string", "null"] }
         service: { type: string }
-        person_hash: { type: string, nullable: true }
+        person_hash: { type: ["string", "null"] }
         person_verified: { type: boolean }
-        purpose: { type: string, nullable: true }
+        purpose: { type: ["string", "null"] }
         outcome: { type: string, enum: [ok, denied, error] }
-        code: { type: string, nullable: true }
+        code: { type: ["string", "null"] }
         count: { type: integer }
-        detail: { type: object, additionalProperties: true, nullable: true }
+        detail: { type: ["object", "null"], additionalProperties: true }
     Health:
       type: object
       required: [status, key, backend, schema_version]
@@ -91,17 +116,27 @@ components:
         public:
           type: object
           additionalProperties: true
-    UseRequest:
+    UseByRef:
       type: object
-      required: [purpose]
+      required: [ref, purpose]
       properties:
         ref: { $ref: "#/components/schemas/SecretRef" }
+        purpose: { type: string }
+        on_behalf_of: { type: ["string", "null"] }
+    UseBySubject:
+      type: object
+      required: [sub, roles, purpose]
+      properties:
         sub: { type: string }
         roles:
           type: array
           items: { type: string }
         purpose: { type: string }
-        on_behalf_of: { type: string, nullable: true }
+        on_behalf_of: { type: ["string", "null"] }
+    UseRequest:
+      oneOf:
+        - { $ref: "#/components/schemas/UseByRef" }
+        - { $ref: "#/components/schemas/UseBySubject" }
     UseResponse:
       type: object
       required: [ref, version, fields]
@@ -123,10 +158,11 @@ paths:
       summary: Write secret fields
       x-permission: write
       parameters:
-        - { name: ns, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/PathNs" }
         - { name: scope, in: path, required: true, schema: { type: string } }
-        - { name: scope_id, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/PathScopeId" }
         - { name: name, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/KeystoneIdentity" }
       requestBody:
         required: true
         content:
@@ -141,9 +177,9 @@ paths:
       summary: Read secret metadata
       x-permission: read-meta
       parameters:
-        - { name: ns, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/PathNs" }
         - { name: scope, in: path, required: true, schema: { type: string } }
-        - { name: scope_id, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/PathScopeId" }
         - { name: name, in: path, required: true, schema: { type: string } }
       responses:
         "200": { description: OK }
@@ -152,10 +188,11 @@ paths:
       summary: Delete a secret
       x-permission: write
       parameters:
-        - { name: ns, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/PathNs" }
         - { name: scope, in: path, required: true, schema: { type: string } }
-        - { name: scope_id, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/PathScopeId" }
         - { name: name, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/KeystoneIdentity" }
       responses:
         "204": { description: deleted }
         "409": { description: in_use }
@@ -164,7 +201,7 @@ paths:
       summary: List secrets in a namespace
       x-permission: read-meta
       parameters:
-        - { name: ns, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/PathNs" }
         - { name: scope, in: query, schema: { type: string } }
         - { name: scope_id, in: query, schema: { type: string } }
       responses:
@@ -174,21 +211,23 @@ paths:
       summary: Create or replace a binding
       x-permission: bind
       parameters:
-        - { name: ns, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/PathNs" }
+        - { $ref: "#/components/parameters/KeystoneIdentity" }
       responses:
         "200": { description: OK }
     delete:
       summary: Remove a binding
       x-permission: bind
       parameters:
-        - { name: ns, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/PathNs" }
+        - { $ref: "#/components/parameters/KeystoneIdentity" }
       responses:
         "204": { description: deleted }
     get:
       summary: List bindings
       x-permission: bind
       parameters:
-        - { name: ns, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/PathNs" }
       responses:
         "200": { description: OK }
   /v1/resolve/{ns}:
@@ -196,7 +235,7 @@ paths:
       summary: Resolve a binding to a secret ref
       x-permission: read-meta
       parameters:
-        - { name: ns, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/PathNs" }
       responses:
         "200": { description: OK }
         "404": { description: not_found }
@@ -205,7 +244,8 @@ paths:
       summary: Decrypt and return secret field values
       x-permission: use
       parameters:
-        - { name: ns, in: path, required: true, schema: { type: string } }
+        - { $ref: "#/components/parameters/PathNs" }
+        - { $ref: "#/components/parameters/KeystoneIdentity" }
       requestBody:
         required: true
         content:
@@ -229,7 +269,6 @@ paths:
     get:
       summary: Health check
       x-permission: read-meta
-      security: []
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Health" } } } }
         "503": { description: unavailable }

@@ -123,11 +123,9 @@ DROP_V1: tuple[str, ...] = (
 
 
 async def install_schema(conn: asyncpg.Connection) -> bool:
-    await conn.execute("SELECT pg_advisory_lock(868001)")
-    try:
-        exists = await conn.fetchval(
-            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'secret_meta')"
-        )
+    async with conn.transaction():
+        await conn.execute("SELECT pg_advisory_xact_lock(868001)")
+        exists = await conn.fetchval("SELECT to_regclass('public.secret_meta') IS NOT NULL")
         if exists:
             return False
         for statement in SCHEMA_V1:
@@ -139,8 +137,6 @@ async def install_schema(conn: asyncpg.Connection) -> bool:
             now,
         )
         return True
-    finally:
-        await conn.execute("SELECT pg_advisory_unlock(868001)")
 
 
 class LocalPostgresStore:
@@ -425,7 +421,7 @@ class LocalPostgresStore:
                     now,
                     actor.service,
                 )
-            detail = {"via": actor.via, "subject": normalized}
+            detail = {"via": actor.via}
             event = await _insert_audit(
                 conn,
                 self._audit_key,
@@ -473,7 +469,7 @@ class LocalPostgresStore:
                 row["ref_name"],
             ).key()
             now = self._clock()
-            detail = {"via": actor.via, "subject": normalized}
+            detail = {"via": actor.via}
             event = await _insert_audit(
                 conn,
                 self._audit_key,
@@ -516,7 +512,7 @@ class LocalPostgresStore:
             )
             if user_row is not None:
                 ref = _ref_from_binding_row(user_row)
-                if await self.meta(ref) is not None:
+                if await _value_row_exists(conn, ref):
                     return ref
                 return None
             role_rows = await conn.fetch(
@@ -528,7 +524,7 @@ class LocalPostgresStore:
                 if _role_name(row["subject"]) not in role_names:
                     continue
                 ref = _ref_from_binding_row(row)
-                if await self.meta(ref) is not None:
+                if await _value_row_exists(conn, ref):
                     return ref
             default_row = await conn.fetchrow(
                 "SELECT * FROM secret_bindings WHERE namespace = $1 AND subject = 'default'",
@@ -537,7 +533,7 @@ class LocalPostgresStore:
             if default_row is None:
                 return None
             ref = _ref_from_binding_row(default_row)
-            if await self.meta(ref) is not None:
+            if await _value_row_exists(conn, ref):
                 return ref
         return None
 
@@ -779,10 +775,18 @@ class LocalPostgresStore:
 
 
 async def _tables_present(conn: asyncpg.Connection) -> bool:
+    return bool(await conn.fetchval("SELECT to_regclass('public.secret_values') IS NOT NULL"))
+
+
+async def _value_row_exists(conn: asyncpg.Connection, ref: SecretRef) -> bool:
     return bool(
         await conn.fetchval(
-            "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
-            "WHERE table_name = 'secret_values')"
+            "SELECT 1 FROM secret_values WHERE namespace = $1 AND scope = $2 "
+            "AND scope_id = $3 AND name = $4",
+            ref.namespace,
+            ref.scope.value,
+            ref.scope_id,
+            ref.name,
         )
     )
 
@@ -790,24 +794,23 @@ async def _tables_present(conn: asyncpg.Connection) -> bool:
 async def _ensure_key(
     conn: asyncpg.Connection, master_key: str
 ) -> tuple[bytes, str, str, bytes, bytes]:
-    row = await conn.fetchrow("SELECT value FROM secret_meta WHERE key = 'store_salt'")
-    if row is None:
-        salt = os.urandom(16)
-        check = key_check(master_key, salt)
-        now = datetime.now(timezone.utc).isoformat()
-        await conn.execute(
-            "INSERT INTO secret_meta (key, value) VALUES ('store_salt', $1) ON CONFLICT DO NOTHING",
-            salt.hex(),
+    async with conn.transaction():
+        await conn.execute("SELECT pg_advisory_xact_lock(868002)")
+        inserted_salt = await conn.fetchval(
+            "INSERT INTO secret_meta (key, value) VALUES ('store_salt', $1) "
+            "ON CONFLICT (key) DO NOTHING RETURNING value",
+            os.urandom(16).hex(),
         )
-        await conn.execute(
-            "INSERT INTO secret_meta (key, value) VALUES ('key_check', $1) ON CONFLICT DO NOTHING",
-            check,
-        )
-        await conn.execute(
-            "INSERT INTO secret_meta (key, value) VALUES ('created_at', $1) ON CONFLICT DO NOTHING",
-            now,
-        )
+        if inserted_salt is not None:
+            check = key_check(master_key, bytes.fromhex(inserted_salt))
+            await conn.execute(
+                "INSERT INTO secret_meta (key, value) VALUES ('key_check', $1) "
+                "ON CONFLICT (key) DO NOTHING",
+                check,
+            )
         row = await conn.fetchrow("SELECT value FROM secret_meta WHERE key = 'store_salt'")
+        if row is None:
+            raise SchemaMissing("secret store metadata is not initialized")
     salt = bytes.fromhex(row["value"])
     expected = key_check(master_key, salt)
     stored = await conn.fetchval("SELECT value FROM secret_meta WHERE key = 'key_check'")
@@ -892,10 +895,11 @@ async def _bind_role(
 ) -> int:
     await conn.execute("SET CONSTRAINTS secret_bindings_position DEFERRED")
     rows = await conn.fetch(
-        "SELECT subject, ref_scope, ref_scope_id, ref_name, position "
+        "SELECT subject, ref_scope, ref_scope_id, ref_name, position, created_at, created_by "
         "FROM secret_bindings WHERE namespace = $1 AND position IS NOT NULL ORDER BY position",
         namespace,
     )
+    existing = {row["subject"]: row for row in rows}
     ordered: list[tuple[str, SecretRef]] = []
     for row in rows:
         if row["subject"] == subject:
@@ -906,34 +910,54 @@ async def _bind_role(
                 SecretRef(namespace, Scope(row["ref_scope"]), row["ref_scope_id"], row["ref_name"]),
             )
         )
-    if position is None or position > len(ordered) + 1:
+    if subject in existing and position is None:
+        place = int(existing[subject]["position"]) - 1
+    elif position is None or position > len(ordered) + 1:
         place = len(ordered)
     else:
         place = position - 1
-    ordered.insert(
-        place,
-        (subject, ref),
-    )
-    await conn.execute(
-        "DELETE FROM secret_bindings WHERE namespace = $1 AND subject LIKE 'role:%'",
-        namespace,
-    )
+    ordered.insert(place, (subject, ref))
     for idx, (subj, bound_ref) in enumerate(ordered, start=1):
+        if subj in existing:
+            await conn.execute(
+                """
+                UPDATE secret_bindings SET
+                    ref_scope = $1,
+                    ref_scope_id = $2,
+                    ref_name = $3,
+                    position = $4
+                WHERE namespace = $5 AND subject = $6
+                """,
+                bound_ref.scope.value,
+                bound_ref.scope_id,
+                bound_ref.name,
+                -idx,
+                namespace,
+                subj,
+            )
+        else:
+            await conn.execute(
+                """
+                INSERT INTO secret_bindings (
+                    namespace, subject, ref_scope, ref_scope_id, ref_name,
+                    position, created_at, created_by
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                """,
+                namespace,
+                subj,
+                bound_ref.scope.value,
+                bound_ref.scope_id,
+                bound_ref.name,
+                -idx,
+                now,
+                by,
+            )
+    for idx, (subj, _) in enumerate(ordered, start=1):
         await conn.execute(
-            """
-            INSERT INTO secret_bindings (
-                namespace, subject, ref_scope, ref_scope_id, ref_name,
-                position, created_at, created_by
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-            """,
+            "UPDATE secret_bindings SET position = $1 WHERE namespace = $2 AND subject = $3",
+            idx,
             namespace,
             subj,
-            bound_ref.scope.value,
-            bound_ref.scope_id,
-            bound_ref.name,
-            idx,
-            now,
-            by,
         )
     return place + 1
 
@@ -942,33 +966,36 @@ async def _rewrite_roles_after_remove(
     conn: asyncpg.Connection, namespace: str, removed: str
 ) -> None:
     await conn.execute("SET CONSTRAINTS secret_bindings_position DEFERRED")
-    rows = await conn.fetch(
-        "SELECT subject, ref_scope, ref_scope_id, ref_name, created_at, created_by "
-        "FROM secret_bindings WHERE namespace = $1 AND position IS NOT NULL "
-        "AND subject <> $2 ORDER BY position",
+    removed_pos = await conn.fetchval(
+        "SELECT position FROM secret_bindings WHERE namespace = $1 AND subject = $2",
         namespace,
         removed,
     )
     await conn.execute(
-        "DELETE FROM secret_bindings WHERE namespace = $1 AND subject LIKE 'role:%'",
+        "DELETE FROM secret_bindings WHERE namespace = $1 AND subject = $2",
+        namespace,
+        removed,
+    )
+    if removed_pos is None:
+        return
+    rows = await conn.fetch(
+        "SELECT subject FROM secret_bindings WHERE namespace = $1 AND position IS NOT NULL "
+        "ORDER BY position",
         namespace,
     )
     for idx, row in enumerate(rows, start=1):
         await conn.execute(
-            """
-            INSERT INTO secret_bindings (
-                namespace, subject, ref_scope, ref_scope_id, ref_name,
-                position, created_at, created_by
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-            """,
+            "UPDATE secret_bindings SET position = $1 WHERE namespace = $2 AND subject = $3",
+            -idx,
             namespace,
             row["subject"],
-            row["ref_scope"],
-            row["ref_scope_id"],
-            row["ref_name"],
+        )
+    for idx, row in enumerate(rows, start=1):
+        await conn.execute(
+            "UPDATE secret_bindings SET position = $1 WHERE namespace = $2 AND subject = $3",
             idx,
-            row["created_at"],
-            row["created_by"],
+            namespace,
+            row["subject"],
         )
 
 

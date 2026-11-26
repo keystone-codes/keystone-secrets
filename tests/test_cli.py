@@ -147,6 +147,46 @@ def test_rekey_exit_codes(pg_dsn: str, schema_ready: None, tmp_path: Path) -> No
     assert good.returncode == 0
 
 
+def test_put_value_file_mode_0700_rejected(pg_dsn: str, schema_ready: None, tmp_path: Path) -> None:
+    secret = "0700-secret"
+    path = tmp_path / "val.txt"
+    path.write_text(secret, encoding="utf-8")
+    path.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    key = secrets.token_urlsafe(32)
+    proc = _run_cli(
+        "put",
+        "keystone",
+        "client",
+        "CLI4",
+        "demo",
+        "--value-file",
+        str(path),
+        env={"SECRETS_DATABASE_URL": pg_dsn, "KEYSTONE_SECRETS_KEY": key},
+    )
+    assert proc.returncode == 2
+    assert secret not in proc.stdout + proc.stderr
+
+
+def test_put_from_file_rejects_non_string(pg_dsn: str, schema_ready: None, tmp_path: Path) -> None:
+    path = tmp_path / "fields.json"
+    path.write_text(json.dumps({"token": 123}), encoding="utf-8")
+    path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    key = secrets.token_urlsafe(32)
+    proc = _run_cli(
+        "put",
+        "keystone",
+        "client",
+        "CLI5",
+        "demo",
+        "--from-file",
+        str(path),
+        env={"SECRETS_DATABASE_URL": pg_dsn, "KEYSTONE_SECRETS_KEY": key},
+    )
+    assert proc.returncode == 2
+    assert "token" in proc.stderr
+    assert "123" not in proc.stderr
+
+
 def test_missing_master_key(pg_dsn: str, schema_ready: None, tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
     stub = tmp_path / "v.txt"

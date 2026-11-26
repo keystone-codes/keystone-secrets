@@ -136,7 +136,13 @@ async def _cmd_put(store: LocalPostgresStore, args: argparse.Namespace) -> int:
         if not isinstance(fields, dict):
             print("fields must be a JSON object", file=sys.stderr)
             return 2
-        fields = {str(k): str(v) for k, v in fields.items()}
+        coerced: dict[str, str] = {}
+        for name, value in fields.items():
+            if not isinstance(value, str):
+                print(f"field {name} must be a string", file=sys.stderr)
+                return 2
+            coerced[str(name)] = value
+        fields = coerced
     elif args.value_file:
         try:
             value = _read_private_file(args.value_file)
@@ -198,7 +204,7 @@ def _read_private_file(path: str) -> str:
     if not file_path.is_file():
         raise _CliError("file not found")
     mode = file_path.stat().st_mode & 0o777
-    if mode & 0o077:
+    if mode & 0o177:
         raise _CliError("file must be mode 600")
     if file_path.stat().st_uid != os.getuid():
         raise _CliError("file must be owned by the current user")

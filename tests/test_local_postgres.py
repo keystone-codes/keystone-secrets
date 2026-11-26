@@ -50,20 +50,23 @@ async def test_parallel_open_single_salt(pg_dsn: str, clean_db: None) -> None:
     await conn.close()
     key = secrets.token_urlsafe(32)
 
-    async def _open() -> bytes:
-        store = await LocalPostgresStore.open(master_key=key, dsn=pg_dsn)
-        try:
-            conn = await asyncpg.connect(pg_dsn)
-            try:
-                row = await conn.fetchval("SELECT value FROM secret_meta WHERE key='store_salt'")
-            finally:
-                await conn.close()
-            return bytes.fromhex(row)
-        finally:
-            await store.close()
+    async def _open() -> LocalPostgresStore:
+        return await LocalPostgresStore.open(master_key=key, dsn=pg_dsn)
 
-    salts = await asyncio.gather(_open(), _open())
-    assert salts[0] == salts[1]
+    stores = await asyncio.gather(_open(), _open())
+    try:
+        conn = await asyncpg.connect(pg_dsn)
+        try:
+            row = await conn.fetchval("SELECT value FROM secret_meta WHERE key='store_salt'")
+        finally:
+            await conn.close()
+        salt = bytes.fromhex(row)
+        assert salt
+        for opened in stores:
+            assert (await opened.health()).key == "ok"
+    finally:
+        for store in stores:
+            await store.close()
 
 
 async def test_drop_v1_removes_tables(pg_dsn: str, clean_db: None) -> None:

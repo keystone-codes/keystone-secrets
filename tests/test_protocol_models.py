@@ -37,7 +37,8 @@ def test_secret_ref_slash_namespace() -> None:
         (lambda: SecretRef("keystone", Scope.CLIENT, "", "name"), "scope_id required"),
         (lambda: SecretRef("keystone", Scope.PLATFORM, "x", "name"), "scope_id must be empty"),
         (lambda: SecretRef("keystone", Scope.PROJECT, "onlyone", "name"), "exactly one slash"),
-        (lambda: SecretRef("keystone", Scope.CLIENT, "a b", "name"), "control"),
+        (lambda: SecretRef("keystone", Scope.CLIENT, "A\x01", "name"), "control"),
+        (lambda: SecretRef("keystone", Scope.CLIENT, "-", "name"), "scope_id"),
         (lambda: SecretRef("keystone", Scope.CLIENT, "A", "x" * 200), "invalid name"),
     ],
 )

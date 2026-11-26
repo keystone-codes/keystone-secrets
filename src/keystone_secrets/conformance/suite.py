@@ -306,3 +306,21 @@ class SecretStoreConformance:
         meta = await st_b.meta(ref)
         assert meta is not None
         assert meta.state == "needs_reentry"
+        st_a2 = await make_store(key_a)
+        got = await st_a2.use(ref, purpose="check", caller=use_caller, on_behalf_of=None)
+        assert got["v"] == "1"
+
+    async def test_bind_audit_has_no_subject_text(
+        self,
+        store: SecretStore,
+        actor: Actor,
+        raw_rows,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        email = "alice@example.com"
+        ref = SecretRef("keystone", Scope.CLIENT, "BAUD", "secret")
+        await store.put(ref, {"v": "1"}, actor=actor)
+        caplog.set_level(logging.INFO, logger="keystone_secrets.audit")
+        await store.bind("keystone", Subject.parse(f"user:{email}"), ref, actor=actor)
+        blob = "\n".join(await raw_rows()) + caplog.text
+        assert email not in blob

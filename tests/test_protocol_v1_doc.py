@@ -71,3 +71,60 @@ def test_permissions_are_declared() -> None:
         if isinstance(op, dict) and "x-permission" in op
     }
     assert perms <= {p.value for p in Permission}
+
+
+_IDENTITY_OPS = {
+    ("PUT", "/v1/secrets/{ns}/{scope}/{scope_id}/{name}"),
+    ("DELETE", "/v1/secrets/{ns}/{scope}/{scope_id}/{name}"),
+    ("PUT", "/v1/bindings/{ns}"),
+    ("DELETE", "/v1/bindings/{ns}"),
+    ("POST", "/v1/use/{ns}"),
+}
+
+
+def _header_param_names(spec: dict, op: dict) -> set[str]:
+    names: set[str] = set()
+    for item in op.get("parameters", []):
+        if not isinstance(item, dict):
+            continue
+        if item.get("in") == "header" and "name" in item:
+            names.add(item["name"])
+            continue
+        ref = item.get("$ref")
+        if ref:
+            ref_name = ref.rsplit("/", 1)[-1]
+            param = spec["components"]["parameters"][ref_name]
+            if param.get("in") == "header":
+                names.add(param["name"])
+    return names
+
+
+def test_identity_header_on_mutating_ops() -> None:
+    spec = _load_spec()
+    for method, path in _IDENTITY_OPS:
+        op = spec["paths"][path][method.lower()]
+        names = _header_param_names(spec, op)
+        assert "X-Keystone-Identity" in names, (method, path)
+
+
+def test_path_params_describe_encoding() -> None:
+    spec = _load_spec()
+    params = spec["components"]["parameters"]
+    assert "SecretRef.key()" in params["PathNs"]["description"]
+    scope_id = params["PathScopeId"]["description"]
+    assert "SecretRef.key()" in scope_id
+    assert "`-" in scope_id or "`-`" in scope_id
+
+
+def test_use_request_one_of() -> None:
+    spec = _load_spec()
+    use = spec["components"]["schemas"]["UseRequest"]
+    assert "oneOf" in use
+    names = {item["$ref"].rsplit("/", 1)[-1] for item in use["oneOf"]}
+    assert names == {"UseByRef", "UseBySubject"}
+
+
+def test_health_keeps_bearer_security() -> None:
+    spec = _load_spec()
+    health = spec["paths"]["/v1/health"]["get"]
+    assert "security" not in health
