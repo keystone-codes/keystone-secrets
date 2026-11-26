@@ -1,0 +1,8 @@
+keystone-secrets
+Copyright 2026 Alexey Klochkov
+
+This product includes software developed as part of stdio-box
+(https://github.com/keystone-codes/stdio-box), licensed under the Apache License 2.0:
+- src/keystone_secrets/crypto.py is derived from src/stdio_box/store/crypto.py (commit 6b02e9f);
+- the audit detail check in src/keystone_secrets/audit.py is derived from stdio_box/store/audit.py.
+Both files were modified: HKDF labels, the error type, and the record id in the AAD.
