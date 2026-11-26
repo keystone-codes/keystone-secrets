@@ -115,8 +115,11 @@ class SecretRef:
         if not _NAME_RE.fullmatch(name):
             raise InvalidRef("invalid name")
         for label, value in (("namespace", namespace), ("scope_id", scope_id), ("name", name)):
-            if any(ord(character) < 32 or ord(character) == 127 for character in value):
-                raise InvalidRef(f"{label} must not contain control characters")
+            if any(
+                character.isspace() or ord(character) < 32 or ord(character) == 127
+                for character in value
+            ):
+                raise InvalidRef(f"{label} must not contain whitespace or control characters")
         if scope_id == "-":
             raise InvalidRef("scope_id must not be '-'")
         if len(scope_id) > _MAX_SCOPE_ID_LEN:
